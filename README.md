@@ -15,7 +15,7 @@ cargo build --target=aarch64-unknown-linux-gnu --target-dir=./target/ -p contain
 
 # Copy the built Wasmtime shim to a location where containerd can find it:
 
-```sudo cp ./target/aarch64-unknown-linux-gnu/debug/containerd-shim-wasmtime /usr/local/bin/```
+```sudo cp ~/runwasi/target/aarch64-unknown-linux-gnu/release/containerd-shim-wasmtime-v1 /usr/local/bin/containerd-shim-wasmtime```
 
 # If containerd is not already installed, install it:
 

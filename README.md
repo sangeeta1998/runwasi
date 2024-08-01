@@ -43,7 +43,9 @@ WantedBy=multi-user.target
 EOF
 
 # Reload systemd and start containerd
+
 sudo systemctl daemon-reload
+
 sudo systemctl enable --now containerd
 
 # configure containerd to use the wasmtime shim by modifying the config.toml file:
@@ -83,10 +85,12 @@ Assuming we already extracted and placed the containerd binary in /usr/local/bin
 
 # Install Docker
 curl -fsSL https://get.docker.com -o get-docker.sh
+
 sudo sh get-docker.sh
 
 # Add  user to the Docker group
 sudo usermod -aG docker $USER
+
 newgrp docker
 
 # Install ctr

@@ -1,264 +1,95 @@
-![runwasi logo light mode](./art/logo/runwasi_icon1.svg#gh-light-mode-only)
-![runwasi logo dark mode](./art/logo/runwasi_icon3.svg#gh-dark-mode-only)
-
-# runwasi
-
-> Warning: Alpha quality software, do not use in production.
-
-This is a project to facilitate running wasm workloads managed by containerd either directly (ie. through ctr) or as directed by Kubelet via the CRI plugin.
-It is intended to be a (rust) library that you can take and integrate with your wasm host.
-Included in the repository is a PoC for running a plain wasi host (ie. no extra host functions except to support wasi system calls).
-
-## Community
-
-- If you haven't joined the CNCF slack yet, you can do so [here](https://slack.cncf.io/).
-- Come join us on our [slack channel #runwasi](https://cloud-native.slack.com/archives/C04LTPB6Z0V)
-on the CNCF slack.
-- Public Community Call on Tuesdays every other week at 9:00 AM PT: [Zoom](https://zoom.us/my/containerd?pwd=bENmREpnSGRNRXdBZWV5UG8wbU1oUT09), [Meeting Notes](https://docs.google.com/document/d/1aOJ-O7fgMyRowHD0kOoA2Z_4d19NyAvvdqOkZO3Su_M/edit?usp=sharing)
-
-## Usage
-
-runwasi is intended to be consumed as a library to be linked to from your own wasm host implementation.
-
-There are two modes of operation supported:
+# Install required dependencies
+sudo apt-get install -y libseccomp-dev build-essential curl git
 
-1. "Normal" mode where there is 1 shim process per container or k8s pod.
-2. "Shared" mode where there is a single manager service running all shims in process.
-
-In either case you need to implement a trait to teach runwasi how to use your wasm host.
-
-There are two ways to do this:
-* implementing the `sandbox::Instance` trait
-* or implementing the `container::Engine` trait
-
-The most flexible but complex is the `sandbox::Instance` trait:
-
-```rust
-pub trait Instance {
-    /// The WASI engine type
-    type Engine: Send + Sync + Clone;
-
-    /// Create a new instance
-    fn new(id: String, cfg: Option<&InstanceConfig<Self::E>>) -> Self;
-    /// Start the instance
-    /// The returned value should be a unique ID (such as a PID) for the instance.
-    /// Nothing internally should be using this ID, but it is returned to containerd where a user may want to use it.
-    fn start(&self) -> Result<u32, Error>;
-    /// Send a signal to the instance
-    fn kill(&self, signal: u32) -> Result<(), Error>;
-    /// Delete any reference to the instance
-    /// This is called after the instance has exited.
-    fn delete(&self) -> Result<(), Error>;
-    /// Wait for the instance to exit
-    /// The waiter is used to send the exit code and time back to the caller
-    /// Ideally this would just be a blocking call with a normal result, however
-    /// because of how this is called from a thread it causes issues with lifetimes of the trait implementer.
-    fn wait(&self, waiter: &Wait) -> Result<(), Error>;
-}
-```
-
-The `container::Engine` trait provides a simplified API:
-
-```rust
-pub trait Engine: Clone + Send + Sync + 'static {
-    /// The name to use for this engine
-    fn name() -> &'static str;
-    /// Run a WebAssembly container
-    fn run_wasi(&self, ctx: &impl RuntimeContext, stdio: Stdio) -> Result<i32>;
-    /// Check that the runtime can run the container.
-    /// This checks runs after the container creation and before the container starts.
-    /// By it checks that the wasi_entrypoint is either:
-    /// * a file with the `wasm` filetype header
-    /// * a parsable `wat` file.
-    fn can_handle(&self, ctx: &impl RuntimeContext) -> Result<()> { /* default implementation*/ }
-}
-```
+# Install Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-After implementing `container::Engine` you can use `container::Instance<impl container::Engine>`, which implements the `sandbox::Instance` trait.
+source $HOME/.cargo/env
 
-To use your implementation in "normal" mode, you'll need to create a binary which has a main that looks something like this:
+# Clone the runwasi repository
+git clone https://github.com/containerd/runwasi.git
+cd runwasi
 
-```rust
-use containerd_shim as shim;
-use containerd_shim_wasm::sandbox::{ShimCli, Instance}
+# Build the wasmtime shim for aarch64
+cargo build --target=aarch64-unknown-linux-gnu --target-dir=./target/ -p containerd-shim-wasmtime
 
-struct MyInstance {
-    // ...
-}
+# Copy the built Wasmtime shim to a location where containerd can find it:
 
-impl Instance for MyInstance {
-    // ...
-}
+```sudo cp ./target/aarch64-unknown-linux-gnu/debug/containerd-shim-wasmtime /usr/local/bin/```
 
-fn main() {
-    shim::run::<ShimCli<MyInstance>>("io.containerd.myshim.v1", opts);
-}
-```
+# If containerd is not already installed, install it:
 
-or when using the `container::Engine` trait, like this:
 
-```rust
-use containerd_shim as shim;
-use containerd_shim_wasm::{sandbox::ShimCli, container::{Instance, Engine}}
+```wget https://github.com/containerd/containerd/releases/download/v1.7.15/containerd-1.7.15-linux-arm64.tar.gz```
+```sudo tar Cxzvf /usr/local containerd-1.7.15-linux-arm64.tar.gz```
 
-struct MyEngine {
-    // ...
-}
+# Set up systemd service for containerd
+sudo tee /etc/systemd/system/containerd.service <<EOF
+[Unit]
+Description=containerd container runtime
+Documentation=https://containerd.io
+After=network.target
 
-impl Engine for MyEngine {
-    // ...
-}
+[Service]
+ExecStart=/usr/local/bin/containerd
+Delegate=yes
+KillMode=process
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
 
-fn main() {
-    shim::run::<ShimCli<Instance<Engine>>>("io.containerd.myshim.v1", opts);
-}
-```
+[Install]
+WantedBy=multi-user.target
+EOF
 
-Note you can implement your own ShimCli if you like and customize your wasm engine and other things.
-I encourage you to checkout how that is implemented.
+# Reload systemd and start containerd
+sudo systemctl daemon-reload
+sudo systemctl enable --now containerd
 
-The shim binary just needs to be installed into `$PATH` (as seen by the containerd process) with a binary name like `containerd-shim-myshim-v1`.
+# configure containerd to use the wasmtime shim by modifying the config.toml file:
 
-For the shared mode:
+```sudo nano /etc/containerd/config.toml```
 
-```rust
-use containerd_shim_wasm::sandbox::{Local, ManagerService, Instance};
-use containerd_shim_wasm::services::sandbox_ttrpc::{create_manager, Manager};
-use std::sync::Arc;
-use ttrpc::{self, Server};
-/// ...
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.wasmtime]
+  runtime_type = "io.containerd.wasmtime.v1"
+  runtime_engine = "/usr/local/bin/containerd-shim-wasmtime"
+  runtime_root = ""
 
-struct MyInstance {
-    /// ...
-}
 
-impl Instance for MyInstance {
-    // ...
-}
 
-fn main() {
-    let s: ManagerService<Local<MyInstance>> =
-        ManagerService::new(Engine::new(Config::new().interruptable(true)).unwrap());
-    let s = Arc::new(Box::new(s) as Box<dyn Manager + Send + Sync>);
-    let service = create_manager(s);
+sudo systemctl restart containerd
 
-    let mut server = Server::new()
-        .bind("unix:///run/io.containerd.myshim.v1/manager.sock")
-        .unwrap()
-        .register_service(service);
+sudo systemctl status containerd
 
-    server.start().unwrap();
-    let (_tx, rx) = std::sync::mpsc::channel::<()>();
-    rx.recv().unwrap();
-}
-```
+ctr runtime list
+(should have wasmtime)
 
-This will be the host daemon that you startup and manage on your own.
-You can use the provided `containerd-shim-myshim-v1` binary as the shim to specify in containerd.
+# Verify built output
 
-Shared mode requires precise control over real threads and as such should not be used with an async runtime.
+```ls ./target/aarch64-unknown-linux-gnu/debug/```
 
-Check out these projects that build on top of runwasi:
-- [spinkube/containerd-shim-spin](https://github.com/spinkube/containerd-shim-spin)
-- [deislabs/containerd-wasm-shims](https://github.com/deislabs/containerd-wasm-shims)
+Copying the binary to /usr/local/bin
 
+```sudo cp ./target/aarch64-unknown-linux-gnu/debug/containerd-shim-wasmtime /usr/local/bin/```
 
-### Components
+Confirm that the binary is correctly placed
 
-- **containerd-shim-[ wasmedge | wasmtime | wasmer ]-v1**
+```ls -l /usr/local/bin/containerd-shim-wasmtime```
 
-This is a containerd shim which runs wasm workloads in [WasmEdge](https://github.com/WasmEdge/WasmEdge) or [Wasmtime](https://github.com/bytecodealliance/wasmtime) or [Wasmer](https://github.com/wasmerio/wasmer).
-You can use it with containerd's `ctr` by specifying `--runtime=io.containerd.[ wasmedge | wasmtime | wasmer ].v1` when creating the container.
-And make sure the shim binary must be in $PATH (that is the $PATH that containerd sees). Usually you just run `make install` after `make build`.
-> build shim with wasmedge we need install library first
+sudo systemctl restart containerd
 
-This shim runs one per pod.
+Assuming we already extracted and placed the containerd binary in /usr/local/bin, the command to create a systemd service file would be:
 
-- **containerd-shim-[ wasmedge | wasmtime | wasmer ]d-v1**
 
-A cli used to connect containerd to the `containerd-[ wasmedge | wasmtime | wasmer ]d` sandbox daemon.
-When containerd requests for a container to be created, it fires up this shim binary which will connect to the `containerd-[ wasmedge | wasmtime | wasmer ]d` service running on the host.
-The service will return a path to a unix socket which this shim binary will write back to containerd which containerd will use to connect to for shim requests.
-This binary does not serve requests, it is only responsible for sending requests to the `containerd-[ wasmedge | wasmtime | wasmer ]d` daemon to create or destroy sandboxes.
+# Install Docker
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh get-docker.sh
 
-- **containerd-[ wasmedge | wasmtime | wasmer ]d**
+# Add  user to the Docker group
+sudo usermod -aG docker $USER
+newgrp docker
 
-This is a sandbox manager that enables running 1 wasm host for the entire node instead of one per pod (or container).
-When a container is created, a request is sent to this service to create a sandbox.
-The "sandbox" is a containerd task service that runs in a new thread on its own unix socket, which we return back to containerd to connect to.
+# Install ctr
+sudo apt-get install containerd-tools
 
-The Wasmedge / Wasmtime / Wasmer engine is shared between all sandboxes in the service.
 
-To use this shim, specify `io.containerd.[ wasmedge | wasmtime | wasmer ]d.v1` as the runtime to use.
-You will need to make sure the `containerd-[ wasmedge | wasmtime | wasmer ]d` daemon has already been started.
-
-## Contributing
-
-To begin contributing, learn to build and test the project or to add a new shim please read our [CONTRIBUTING.md](./CONTRIBUTING.md)
-
-## Demo
-
-### Installing the shims for use with Containerd
-
-Make sure you have [installed dependencies](./CONTRIBUTING.md#setting-up-your-local-environment) and install the shims:
-
-```terminal
-make build
-sudo make install
-```
-
-> Note: `make build` will only build one binary. The `make install` command copies the binary to $PATH and uses symlinks to create all the component described above. 
-
-Build the test image and load it into containerd:
-
-```
-make test-image
-make load
-```
-
-### Demo 1 using container image that contains a Wasm module.
-
-Run it with `sudo ctr run --rm --runtime=io.containerd.[ wasmedge | wasmtime | wasmer ].v1 ghcr.io/containerd/runwasi/wasi-demo-app:latest testwasm /wasi-demo-app.wasm echo 'hello'`. You should see some output repeated like:
-
-```terminal
-sudo ctr run --rm --runtime=io.containerd.wasmtime.v1 ghcr.io/containerd/runwasi/wasi-demo-app:latest testwasm
-
-This is a song that never ends.
-Yes, it goes on and on my friends.
-Some people started singing it not knowing what it was,
-So they'll continue singing it forever just because...
-
-This is a song that never ends.
-Yes, it goes on and on my friends.
-Some people started singing it not knowing what it was,
-So they'll continue singing it forever just because...
-
-(...)
-```
-
-To kill the process, you can run in other session: `sudo ctr task kill -s SIGKILL testwasm`. 
-
-The test binary supports commands for different type of functionality, check [crates/wasi-demo-app/src/main.rs](crates/wasi-demo-app/src/main.rs) to try it out.
-
-### Demo 2 using OCI Images with custom WASM layers
-
-The previous demos run with an OCI Container image containing the wasm module in the file system.  Another option is to provide a cross-platform OCI Image that that will not have the wasm module or components in the file system of the container that wraps the wasmtime/wasmedge process.  This OCI Image with custom WASM layers can be run across any platform and provides for de-duplication in the Containerd content store among other benefits. To build OCI images using your own images you can use the [oci-tar-builder](./crates/oci-tar-builder/README.md)
-
-To learn more about this approach checkout the [design document](https://docs.google.com/document/d/11shgC3l6gplBjWF1VJCWvN_9do51otscAm0hBDGSSAc/edit).  
-
-> **Note**: This requires containerd 1.7.7+ and 1.6.25+.  If you do not have these patches for both `containerd` and `ctr` you will end up with an error message such as `mismatched image rootfs and manifest layers` at the import and run steps. Latest versions of k3s and kind have the necessary containerd versions.
-
-Build and import the OCI image with WASM layers image:
-
-```
-make test-image/oci
-make load/oci
-```
-
-Run the image with `sudo ctr run --rm --runtime=io.containerd.[ wasmedge | wasmtime | wasmer ].v1 ghcr.io/containerd/runwasi/wasi-demo-oci:latest testwasmoci`
-
-```
-sudo ctr run --rm --runtime=io.containerd.wasmtime.v1 ghcr.io/containerd/runwasi/wasi-demo-oci:latest testwasmoci wasi-demo-oci.wasm echo 'hello'
-hello
-exiting 
-```

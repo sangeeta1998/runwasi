@@ -13,6 +13,8 @@ cd runwasi
 # Build the wasmtime shim for aarch64
 cargo build --target=aarch64-unknown-linux-gnu --target-dir=./target/ -p containerd-shim-wasmtime
 
+cargo build --target=x86_64-unknown-linux-gnu --target-dir=./target/ -p containerd-shim-wasmtime
+
 # Copy the built Wasmtime shim to a location where containerd can find it:
 
 ```sudo cp ~/runwasi/target/aarch64-unknown-linux-gnu/release/containerd-shim-wasmtime-v1 /usr/local/bin/containerd-shim-wasmtime```
